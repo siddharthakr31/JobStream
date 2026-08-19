@@ -1,80 +1,65 @@
-# JobStream — Engineering Decisions
+# JobStream - Engineering Decisions
 
-## 1. Source Selection
+## 1. Ingestion Strategy
 
-JobStream uses a permitted public job source through a dedicated source adapter.
+I chose a permitted public job source rather than attempting to scrape a protected platform such as LinkedIn. The source is isolated behind a dedicated adapter:
 
-The source adapter is isolated from the rest of the ingestion pipeline so that additional permitted sources can be added without changing normalization, validation, deduplication, or storage logic.
+Source -> Adapter -> Normalize -> Validate -> Deduplicate -> Store
 
-## 2. Why Not LinkedIn?
+This keeps source-specific retrieval logic separate from the core ingestion pipeline. A second permitted source can therefore be added without rewriting normalization, validation, deduplication, or storage.
 
-LinkedIn was not used because the assignment scope does not require bypassing authentication, CAPTCHA, anti-bot controls, fingerprinting, or other platform restrictions.
+I rejected directly automating LinkedIn because the assignment explicitly provides a low-risk public-source guardrail. I did not want to bypass authentication, CAPTCHA, fingerprinting, rate limits, or other platform protections.
 
-The goal was to demonstrate a reliable ingestion architecture using a permitted source rather than circumventing platform protections.
+## 2. Resilience and Failure Handling
 
-## 3. Source Adapter Architecture
+The source adapter uses bounded retries with exponential backoff for transient failures. Retries stop after a defined limit so a permanently unavailable source cannot block the ingestion pipeline indefinitely.
 
-Each source is treated as an adapter responsible only for retrieving source data and converting it into the ingestion pipeline's expected input.
+A failed source is reported as a failed ingestion run rather than being silently converted into an empty successful result.
 
-This keeps source-specific logic separate from the core pipeline.
+Incoming records are normalized into one internal job structure and validated before storage. Jobs are deduplicated using a stable identifier so repeated ingestion does not create duplicate records.
 
-Conceptually:
+If the primary source becomes unavailable, the architecture allows another permitted source adapter to be added without changing the rest of the pipeline.
 
-Source → Adapter → Normalize → Validate → Deduplicate → Store
+## 3. Detection and Scope Boundary
 
-## 4. Retry Strategy
+Automated access to protected job platforms can be detected through signals such as request frequency and timing, missing or unusual headers, session behavior, browser/headless fingerprints, IP reputation, and CAPTCHA or authentication challenges.
 
-Transient source failures use bounded retries with exponential backoff.
+I intentionally did not implement techniques for bypassing these protections. The live demo uses a permitted public source so the engineering focus remains on reliable ingestion, normalization, validation, deduplication, and failure handling.
 
-Retries are intentionally bounded so that a permanently unavailable source does not block the entire ingestion process indefinitely.
+My technical boundary is that I will not circumvent authentication, CAPTCHA, anti-bot controls, or other access restrictions. If a source blocks the permitted adapter, the system should fail explicitly and switch to another permitted source rather than attempting to evade the restriction.
 
-If the source remains unavailable after the retry limit, the ingestion run is marked as failed rather than silently returning an empty result.
+## 4. Trade-off Under the Time Limit
 
-## 5. Normalization
+The main trade-off was keeping the storage layer simple with SQLite and focusing the available time on the ingestion architecture, resilience, validation, and deduplication.
 
-Source-specific job fields are converted into a consistent internal job representation.
+With a full week, I would move storage to a persistent managed database, add structured logging and source-health metrics, add automated integration tests, introduce a job queue for larger workloads, and implement multiple permitted source adapters with health-based fallback.
 
-This allows downstream processing to operate on one predictable structure regardless of the source format.
+## 5. AI Usage and Verification
 
-## 6. Validation
+I used AI tools as a development assistant for implementation guidance, debugging, and reviewing the architecture.
 
-Incoming jobs are validated before being stored.
+I personally ran the application, inspected the source code, verified the build, tested the health endpoint, tested ingestion locally, verified that the first run inserted records and that a repeated run detected duplicates, and verified the deployed API.
 
-Invalid records are rejected rather than allowing malformed data to enter the storage layer.
+I also reviewed and made the final engineering decisions around source selection, retry behavior, failure handling, deduplication, and the scope boundary. I can explain the submitted code and architecture in a follow-up discussion.
 
-## 7. Deduplication
+## 6. Evidence of the Working Pipeline
 
-Jobs are deduplicated using a stable identifier derived from the available job/source information.
+The deployed service was tested end-to-end.
 
-This prevents repeated ingestion runs from creating unnecessary duplicate records.
+A fresh local ingestion produced:
 
-## 8. Failure Handling
+- 20 fetched
+- 20 accepted
+- 20 inserted
+- 0 duplicates
+- 0 rejected
 
-Failures are surfaced explicitly through the ingestion result/history rather than being hidden.
+A repeated ingestion produced:
 
-This makes it possible to distinguish between:
+- 20 fetched
+- 20 accepted
+- 0 inserted
+- 20 duplicates
+- 0 rejected
 
-- successful ingestion
-- partial/record-level failures
-- source failures
-- validation failures
-
-## 9. Extensibility
-
-A second permitted source can be introduced by implementing another source adapter.
-
-The core normalization, validation, deduplication, and storage pipeline does not need to be rewritten.
-
-## 10. Production Improvements
-
-For a production deployment, I would additionally introduce:
-
-- source health metrics
-- structured logging
-- alerting
-- monitoring of ingestion success/failure rates
-- persistent job queues for larger workloads
-- multiple permitted source adapters
-- more comprehensive automated tests
-
-These are intentionally outside the minimum MVP scope.
+The deployed service also successfully completed ingestion and returned the expected deduplication result.
